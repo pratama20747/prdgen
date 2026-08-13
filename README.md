@@ -10,6 +10,8 @@ Kenapa dipecah gitu? Karena AI yang dikasih tugas kebanyakan sekaligus
 cenderung ngarang atau lupa detail. Dengan dipecah, tiap agent cuma perlu
 fokus satu hal, dan hasil satu agent jadi input buat agent berikutnya.
 
+Contoh hasil prdgen:https://github.com/pratama20747/prdgen
+
 ---
 
 ## Daftar Isi
