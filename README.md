@@ -1,0 +1,509 @@
+# prdgen
+
+CLI buat generate PRD, LLD (Low-Level Design), dan GitHub issues dari satu
+ide aplikasi -- lewat serangkaian agent AI yang masing-masing fokus satu
+tugas kecil (tanya-jawab detail, audit keamanan, tulis PRD, desain schema,
+desain API, susun coding plan, tulis issue), bukan satu AI besar yang
+disuruh ngerjain semuanya sekaligus.
+
+Kenapa dipecah gitu? Karena AI yang dikasih tugas kebanyakan sekaligus
+cenderung ngarang atau lupa detail. Dengan dipecah, tiap agent cuma perlu
+fokus satu hal, dan hasil satu agent jadi input buat agent berikutnya.
+
+---
+
+## Daftar Isi
+
+- [Sebelum mulai](#sebelum-mulai)
+- [Instalasi](#instalasi)
+- [Panduan buat yang baru pertama kali pakai](#panduan-buat-yang-baru-pertama-kali-pakai)
+- [Command reference](#command-reference)
+  - [`prdgen new`](#prdgen-new---bikin-prd)
+  - [`prdgen lld`](#prdgen-lld---bikin-low-level-design)
+  - [`prdgen issues`](#prdgen-issues---generate-github-issues)
+  - [`prdgen revise`](#prdgen-revise---perbaiki-dokumen-yang-sudah-jadi)
+- [Setelah issue dibuat: cara pakai bareng AI coding agent](#setelah-issue-dibuat-cara-pakai-bareng-ai-coding-agent)
+- [Semua file yang dihasilkan](#semua-file-yang-dihasilkan)
+- [Cara kerja resume & checkpoint](#cara-kerja-resume--checkpoint)
+- [Edge case yang sudah ditangani](#edge-case-yang-sudah-ditangani)
+- [Keterbatasan yang belum ditangani](#keterbatasan-yang-belum-ditangani)
+- [Custom prompt tanpa rebuild](#custom-prompt-tanpa-rebuild)
+- [Testing](#testing)
+- [Ganti provider LLM](#ganti-provider-llm)
+
+---
+
+## Sebelum mulai
+
+**Sebelum lo buka `prdgen`, matangin dulu ide lo di luar tool ini.** Ngobrol
+sama AI chat biasa (ChatGPT/Claude/dll) buat brainstorming, gambar alurnya
+di Excalidraw atau kertas. `prdgen` didesain buat mengubah ide yang udah
+cukup jelas jadi dokumen teknis terstruktur -- bukan buat bantu lo mikirin
+ide dari nol. Semakin jelas ide awal yang lo kasih, semakin sedikit asumsi
+yang harus ditebak sistem, dan semakin bagus hasilnya.
+
+---
+
+## Instalasi
+
+Butuh Go 1.22+ terinstall.
+
+```bash
+git clone <repo-ini>
+cd prdgen
+go build -o prdgen ./cmd/prdgen
+```
+
+Ini menghasilkan satu binary `prdgen`. Pindahin ke folder yang ada di
+`$PATH` kalau mau bisa dipanggil dari mana saja (opsional):
+
+```bash
+sudo mv prdgen /usr/local/bin/
+```
+
+### Setup API key
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`, isi:
+
+```
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+`prdgen` otomatis baca file `.env` -- tidak perlu `export` manual tiap buka
+terminal baru. Urutan pencarian: `.env` di dalam folder project target dulu
+(jadi tiap project bisa punya API key/model beda), baru fallback ke `.env`
+di folder tempat lo jalanin command. Kalau lo sudah `export` manual di
+shell, itu selalu menang di atas isi `.env`.
+
+**Kenapa DeepSeek, dan kenapa boleh model reasoning yang lambat/mahal**:
+tahap planning (PRD/LLD) ini krusial dan cuma dijalanin sesekali per
+project -- beda dengan tahap eksekusi coding yang dijalanin berkali-kali.
+Jadi wajar pakai model yang lebih pintar/lambat di sini, walau nanti pas
+coding beneran lo pakai model yang lebih murah dan cepat.
+
+---
+
+## Panduan buat yang baru pertama kali pakai
+
+Ini alur lengkap dari nol sampai siap coding, buat 1 project baru:
+
+### Langkah 1 -- PRD
+
+```bash
+prdgen new ./nama-project
+```
+
+Lo akan ditanya nulis ide aplikasi (bebas, boleh panjang, akhiri dengan
+baris kosong buat lanjut). Setelah itu sistem akan **nanya balik minimal
+15 pertanyaan** dikelompokkan per kategori (skala, timeline, budget, tech
+stack, auth, deployment, dst). Jawab sejujurnya -- kalau ada yang belum
+kepikiran, boleh jawab "belum mikir", itu juga informasi yang berguna
+(lebih baik daripada sistem menebak sendiri).
+
+Setelah dijawab, sistem otomatis:
+1. Bikin **threat model** (analisis keamanan) berdasarkan ide + jawaban lo.
+   Ditampilkan, lo diminta konfirmasi lanjut atau tidak.
+2. Bikin **PRD final** yang menggabungkan semuanya, termasuk section
+   keamanan dari threat model tadi.
+3. Jalanin **validasi otomatis**: AI lain mengecek apakah PRD yang baru
+   jadi itu beneran konsisten sama jawaban yang lo kasih di awal (bukan
+   ngarang sendiri). Hasilnya disimpan terpisah, silakan dibaca.
+
+### Langkah 2 -- LLD (Low-Level Design)
+
+```bash
+prdgen lld ./nama-project
+```
+
+Perlu PRD dari langkah 1 sudah ada. Ini menghasilkan 3 dokumen berurutan
+(tiap dokumen jadi konteks buat dokumen berikutnya):
+1. **Database schema** (ERD + detail tabel/kolom/index).
+2. **API contracts** (spesifikasi tiap endpoint, request/response, error
+   format).
+3. **Coding plan** (dipecah per fase, file apa yang perlu dibuat, best
+   practice apa yang perlu diikuti).
+
+Di tiap tahap lo diminta konfirmasi lanjut. Setelah selesai, ada validasi
+otomatis lagi -- kali ini mengecek apakah tech stack di coding plan beneran
+sama dengan yang diputuskan di PRD (ini nyegah kasus kayak PRD bilang
+"pakai Next.js" tapi coding plan-nya malah ngarang pakai bahasa lain).
+
+### Langkah 3 (opsional) -- GitHub Issues
+
+```bash
+prdgen issues ./nama-project
+```
+
+Perlu LLD dari langkah 2 sudah ada. Ini mengubah coding plan jadi daftar
+issue GitHub yang siap dipakai AI Coding Agent atau developer sebagai
+to-do list. Detail lengkap di bagian command reference di bawah.
+
+### Langkah 4 (kalau perlu) -- Revisi
+
+Kalau ada bagian dokumen yang salah atau kurang pas, jangan edit manual
+file-nya -- pakai:
+
+```bash
+prdgen revise ./nama-project prd     # atau: schema / api / plan
+```
+
+Detail di bagian command reference.
+
+---
+
+## Command reference
+
+### `prdgen new` -- bikin PRD
+
+```
+prdgen new <folder-project>
+```
+
+Menjalankan 4 tahap berurutan: **Discovery** (tanya-jawab) -> **Security
+Audit** (threat model) -> **PRD** (dokumen final) -> **Validasi PRD** (cek
+konsistensi otomatis).
+
+Kalau folder project belum ada, otomatis dibuat. Kalau lo jalanin command
+ini lagi di folder yang sama dan sebagian tahap sudah selesai sebelumnya
+(misal kemarin sempat berhenti di tengah), otomatis **lanjut dari tahap
+terakhir yang belum selesai** -- tidak mengulang dari nol, tidak manggil
+AI lagi untuk tahap yang sudah beres. Lihat bagian resume di bawah.
+
+### `prdgen lld` -- bikin Low-Level Design
+
+```
+prdgen lld <folder-project>
+```
+
+Butuh `PRD.md` sudah ada di folder itu (hasil `prdgen new`). Menjalankan 4
+tahap berurutan: **Database Schema** -> **API Contracts** -> **Coding Plan**
+-> **Validasi LLD**. Sama seperti `new`, otomatis resume kalau sebelumnya
+berhenti di tengah.
+
+### `prdgen issues` -- generate GitHub issues
+
+```
+prdgen issues <folder-project> [owner/repo]
+```
+
+Butuh `LLD_PLAN.md` sudah ada (hasil `prdgen lld`), dan butuh **GitHub CLI
+(`gh`) sudah terinstall dan login** (`gh auth login` sekali di awal).
+Argumen `owner/repo` opsional -- kalau tidak diisi, `gh` menebak repo dari
+folder git tempat lo menjalankan command.
+
+**Apa yang dilakukan command ini, langkah demi langkah:**
+
+1. AI membaca PRD + schema + API contracts + coding plan, lalu menyusun
+   draft issue. Hasilnya berupa **data terstruktur** (judul, isi, label per
+   issue) -- disimpan ke `ISSUES.json`. Di titik ini belum ada satupun
+   yang dikirim ke GitHub.
+2. Tiap issue di draft ditampilkan **satu per satu**, lengkap dengan judul,
+   fase, label, dan isi lengkapnya. Untuk tiap issue, lo pilih:
+   - **Enter (kosong)** -- issue ini langsung dibuat di GitHub sekarang.
+   - **`e`** -- kasih feedback bebas (misal "acceptance criteria-nya
+     kurang spesifik, tambahin ini itu"), AI merevisi **issue ini saja**
+     berdasarkan feedback tadi, lalu ditampilkan ulang buat direview lagi.
+     Bisa diulang berkali-kali sampai lo puas, baru putuskan buat/skip.
+   - **`s`** -- lewati, issue ini tidak dibuat.
+   - **`q`** -- berhenti sekarang. Issue yang belum diproses dibiarkan di
+     draft, bisa dilanjut lain waktu.
+3. Setiap issue yang berhasil dibuat, judul dan link-nya dicatat ke
+   `ISSUES_CREATED.log`. Kalau lo jalankan `prdgen issues` lagi nanti
+   (misal setelah tekan `q` di tengah jalan), issue yang sudah tercatat di
+   log ini otomatis dilewati -- **tidak akan dibuat dobel** di GitHub.
+
+**Kenapa ini dianggap aman dijalankan** (poin penting kalau lo khawatir
+soal AI yang bisa "eksekusi command"): AI di sini **tidak pernah**
+menghasilkan atau menjalankan perintah terminal apapun. AI cuma
+menghasilkan data (judul, isi, label -- sebagai field terpisah dalam
+format JSON). Yang benar-benar memanggil `gh` di terminal adalah kode Go
+biasa, lewat cara yang memisahkan tiap argumen (bukan menggabungkan jadi
+satu baris perintah). Efeknya: apapun isi judul/body issue -- termasuk
+kalau kebetulan mengandung karakter yang biasanya "berbahaya" di
+terminal seperti `;`, backtick, `$()` -- akan selalu diperlakukan sebagai
+teks biasa, tidak pernah bisa berubah jadi perintah lain yang tidak
+diinginkan.
+
+### `prdgen revise` -- perbaiki dokumen yang sudah jadi
+
+```
+prdgen revise <folder-project> [prd|schema|api|plan]
+```
+
+Kalau target (`prd`/`schema`/`api`/`plan`) tidak disebutkan di command,
+lo akan ditanya interaktif.
+
+Dipakai kalau lo baca hasil `PRD.md`, `03_schema.md`, `04_api_contracts.md`,
+atau `LLD_PLAN.md` dan ada bagian yang salah, kurang detail, atau perlu
+diubah. Bedanya dengan validasi otomatis (`PRD_VALIDATION.md` /
+`LLD_VALIDATION.md`): validasi cuma **melaporkan** masalah, `revise` yang
+**benar-benar memperbaiki**.
+
+Alurnya: lo tulis feedback bebas (bisa multi-baris, akhiri dengan baris
+kosong) -> AI merevisi dokumen itu secara penuh (dengan konteks dokumen
+lain yang relevan supaya hasil revisi tetap konsisten, misal merevisi
+schema akan tetap memperhatikan PRD) -> hasil revisi ditampilkan lengkap
+-> lo diminta konfirmasi (y/n) sebelum file aslinya benar-benar ditimpa.
+
+**Penting**: merevisi satu dokumen bisa bikin dokumen turunannya jadi
+tidak sinkron. Misal kalau lo revisi `PRD.md` setelah `03_schema.md` sudah
+dibuat, schema itu tidak otomatis ikut berubah. Setelah revisi yang cukup
+besar, jalankan ulang tahap berikutnya yang relevan (`prdgen lld` atau
+`prdgen issues`) untuk generate ulang dokumen yang terpengaruh.
+
+---
+
+## Setelah issue dibuat: cara pakai bareng AI coding agent
+
+Issue yang sudah dibuat di GitHub itu **bukan** dokumen yang berdiri
+sendiri. Tiap issue cuma potongan kecil dari `PRD.md`, `03_schema.md`,
+`04_api_contracts.md`, dan `LLD_PLAN.md` -- lihat bagian "Technical Notes"
+di tiap issue, sering ada rujukan kayak "ERD Section 3" atau "API Contract
+7.2" yang isinya cuma ada di file-file itu, bukan di issue itu sendiri.
+Kalau AI coding agent cuma dikasih issue-nya doang tanpa dokumen
+pendukung, dia akan menebak sendiri detail seperti nama kolom database,
+format response API, atau urutan error code -- dan kemungkinan besar
+hasilnya meleset dari yang sudah dirancang.
+
+Jadi alurnya begini:
+
+### 1. Bawa dokumen pendukung ke repo kode
+
+Copy 4 file ini dari folder project ke folder `docs/` di repo
+GitHub tempat issue-nya dibuat, lalu commit & push:
+
+```bash
+mkdir -p /path/ke/repo-kode/docs
+cp PRD.md 03_schema.md 04_api_contracts.md LLD_PLAN.md /path/ke/repo-kode/docs/
+cd /path/ke/repo-kode
+git add docs/
+git commit -m "docs: tambah PRD, schema, API contracts, coding plan"
+git push
+```
+1a. Jika Menggunakan AI Web (ChatGPT Web / Claude.ai)
+AI Web bisa langsung membaca file dari repo GitHub kamu atau kamu bisa meng-upload file .md dari folder docs/ lokal sebagai lampiran (attachment).
+
+1b. Jika Menggunakan AI Agent Lokal / Editor (Zed Editor, Cursor, Windsurf, Claude Code)
+Jangan pernah copy-paste isi file atau suruh AI baca via URL GitHub API (karena boros token, ada overhead metadata JSON, dan lebih lambat).
+
+Karena folder docs/ sudah ada di komputer lokal kamu, manfaatkan fitur pemanggilan file internal editor secara instan:
+Dengan begini, dokumennya ikut ada di repo yang sama dengan kode -- AI
+coding agent yang jalan di repo itu (Claude Code, Cursor, dll) bisa baca
+sendiri filenya, lo tidak perlu copy-paste isi dokumen manual tiap kali
+mau ngerjain satu issue.
+
+### 2. Kerjakan issue berurutan sesuai fase, jangan lompat
+
+Issue-issue ini didesain berurutan (Fase 1 -> Fase 2 -> dst, lihat label
+`phase-1`, `phase-2`, ...) karena saling bergantung -- Fase 2 butuh
+project skeleton dari Fase 1, Fase 6 butuh module Auth dari Fase 3-5, dan
+seterusnya. Selesaikan semua issue dalam satu fase dulu (dan pastikan
+lolos acceptance criteria-nya) sebelum mulai fase berikutnya.
+
+### 3. Buka branch dari issue
+
+```bash
+gh issue develop <nomor-issue> --checkout
+```
+
+Ini bikin branch yang otomatis ter-link ke issue tersebut, jadi kalau PR
+dari branch ini di-merge, issue-nya otomatis ke-close.
+
+### 4. Kasih AI coding agent konteks: issue + dokumen
+
+Buka terminal di root repo kode (yang folder `docs/`-nya sudah ada), lalu
+jalankan agent (Claude Code, Cursor, dll) dengan prompt yang eksplisit
+nyuruh dia baca issue dan bagian dokumen yang relevan dulu, baru mulai
+coding. Contoh template prompt:
+
+```
+Kerjakan GitHub issue #<nomor> di repo ini.
+
+Langkah yang harus kamu ikuti:
+1. Baca isi issue-nya dulu: `gh issue view <nomor>`
+2. Baca bagian yang relevan dari dokumen pendukung di folder docs/
+   sebelum mulai coding:
+   - docs/PRD.md          -> konteks produk & requirement
+   - docs/03_schema.md    -> skema database (ERD), jangan menyimpang
+     dari nama tabel/kolom/constraint yang sudah ditentukan di sini
+   - docs/04_api_contracts.md -> kontrak API (request/response/error
+     code), jangan ubah format response sendiri
+   - docs/LLD_PLAN.md     -> coding plan, cek fase yang sesuai issue
+     ini untuk detail file yang perlu dibuat/diubah
+3. Implementasikan SEMUA poin di "Acceptance Criteria" issue ini --
+   jangan ada yang terlewat, jangan nambah scope di luar issue.
+4. Ikuti "Technical Notes" di issue secara ketat, terutama detail
+   teknis yang merujuk ke section dokumen tertentu.
+5. Kalau ada bagian issue yang bertentangan dengan dokumen di docs/,
+   berhenti dan tanya ke aku, jangan menebak sendiri mana yang benar.
+6. Setelah selesai, jalankan test yang relevan (kalau sudah ada), lalu
+   ringkas di akhir: poin acceptance criteria mana saja yang sudah
+   terpenuhi dan bagaimana caranya (misal ditest di mana / dicek apa).
+
+Jangan mulai coding sebelum langkah 1 dan 2 selesai kamu baca.
+```
+
+Sesuaikan detail command (`gh issue view`) dan nama file kalau agent yang
+lo pakai tidak punya akses `gh` CLI langsung -- dalam kasus itu, paste isi
+issue-nya manual di awal prompt.
+
+### 5. Review pakai acceptance criteria sebagai checklist QA
+
+Tiap issue punya daftar `- [ ]` di bagian Acceptance Criteria. Sebelum
+approve PR dari agent, minta dia jelasin satu-satu poin itu sudah
+dipenuhi gimana (atau tulis test yang membuktikannya). Jangan approve
+PR yang cuma bilang "sudah selesai" tanpa rincian per poin.
+
+### 6. Satu issue = satu PR
+
+Jangan gabungin banyak issue dalam satu PR/commit besar. Selain lebih
+gampang direview, kalau ada satu bagian yang salah, gampang di-revert
+tanpa mempengaruhi issue lain yang sudah beres.
+
+---
+
+## Semua file yang dihasilkan
+
+Semua tersimpan di folder project yang lo tentukan (`<folder-project>/`):
+
+| File | Dari command | Isi |
+|---|---|---|
+| `00_idea.md` | `new` | Ide mentah yang lo tulis di awal |
+| `01a_discovery_questions.md` | `new` | Pertanyaan discovery (tersimpan sebelum lo jawab) |
+| `01_discovery_qa.md` | `new` | Pertanyaan discovery + jawaban lo |
+| `02_threat_report.md` | `new` | Threat model dari Security Auditor |
+| `PRD.md` | `new` | PRD final |
+| `PRD_VALIDATION.md` | `new` | Laporan cross-check PRD vs jawaban discovery |
+| `03_schema.md` | `lld` | Database schema & ERD |
+| `04_api_contracts.md` | `lld` | Spesifikasi API |
+| `LLD_PLAN.md` | `lld` | Step-by-step coding plan |
+| `LLD_VALIDATION.md` | `lld` | Laporan cross-check tech stack: PRD vs schema/API/plan |
+| `ISSUES.json` | `issues` | Draft GitHub issues (data terstruktur, bisa diedit manual) |
+| `ISSUES_CREATED.log` | `issues` | Catatan issue yang sudah berhasil dibuat di GitHub |
+
+---
+
+## Cara kerja resume & checkpoint
+
+Prinsip dasarnya: **tiap tahap disimpan ke file begitu selesai, dan
+keputusan "lanjut dari tahap mana" dicek murni dari file mana saja yang
+sudah ada** -- bukan disimpan di memori proses. Jadi:
+
+- Kalau `prdgen` di-Ctrl+C, error karena internet putus, atau sengaja
+  ditutup di tengah jalan, tidak ada progress yang hilang lebih dari 1
+  tahap terakhir yang belum sempat tersimpan.
+- Jalankan command yang sama lagi kapan saja (besok, minggu depan) --
+  otomatis lanjut dari tahap terakhir yang belum selesai. Tidak akan
+  mengulang tahap yang sudah beres, jadi tidak ada API call yang
+  terbuang percuma.
+- File kosong (0 byte) **tidak dianggap selesai** -- kalau suatu tahap
+  gagal di tengah dan sempat menghasilkan file kosong, run berikutnya
+  akan mengulang tahap itu, bukan menganggapnya sudah beres.
+
+---
+
+## Edge case yang sudah ditangani
+
+Ini daftar situasi spesifik yang sudah ditangani lewat desain sistemnya,
+bukan cuma "kebetulan jalan":
+
+- **Pertanyaan discovery hilang kalau di-Ctrl+C sebelum sempat jawab
+  semua.** Pertanyaan dari AI disimpan ke `01a_discovery_questions.md`
+  *segera* setelah di-generate, sebelum lo diminta jawab. Kalau lo
+  berhenti di tengah dan lanjut lagi nanti, pertanyaan yang sama persis
+  akan ditampilkan lagi (tidak generate ulang / tidak manggil AI lagi),
+  lo tinggal jawab dari awal.
+- **Cancel setelah threat report selesai, sebelum PRD.** Threat report
+  disimpan ke disk *sebelum* lo diminta konfirmasi "lanjut ke PRD?". Kalau
+  lo jawab tidak atau berhenti di situ, lalu jalankan `prdgen new` lagi,
+  sistem langsung lompat ke pembuatan PRD (skip discovery & security yang
+  sudah beres), tidak mengulang dari nol.
+- **AI mengembalikan respons kosong.** Kadang API mengembalikan status
+  sukses tapi isinya kosong (biasanya karena model reasoning kehabisan
+  token buat "mikir" sebelum sempat menjawab). Ini dideteksi dan langsung
+  jadi error yang jelas, bukan diam-diam menyimpan file kosong yang nanti
+  dianggap "selesai" secara keliru.
+- **Model membungkus JSON dalam markdown code fence.** Untuk fitur
+  `issues`, kadang AI membungkus JSON hasilnya dengan tiga-backtick json
+  walau sudah diminta tidak melakukan itu. Ini otomatis dibersihkan
+  sebelum di-parse.
+- **Issue GitHub dibuat dobel kalau `issues` dijalankan berkali-kali.**
+  Issue yang sudah berhasil dibuat dicatat ke `ISSUES_CREATED.log`. Run
+  berikutnya otomatis melewati issue yang judulnya sudah ada di log itu.
+- **`gh` belum terinstall atau belum login.** Dicek di awal sebelum mulai
+  loop pembuatan issue, supaya gagalnya cepat dengan pesan jelas --
+  bukan gagal di tengah setelah sebagian issue sudah terlanjur dibuat.
+- **Tech stack di LLD tidak sinkron dengan yang diputuskan PRD.** Prompt
+  di setiap tahap LLD secara eksplisit diinstruksikan mengikuti section
+  Tech Stack di PRD, dan ada tahap validasi otomatis terpisah
+  (`LLD_VALIDATION.md`) yang mengecek ulang hal ini setelah semua
+  dokumen LLD selesai.
+- **Ide awal sudah menjawab sebagian pertanyaan.** Prompt discovery
+  diinstruksikan tetap menggali detail lanjutan untuk kategori yang sudah
+  disinggung di ide awal, bukan menganggapnya sudah cukup dan melewati
+  kategori itu.
+
+---
+
+## Keterbatasan yang belum ditangani
+
+Supaya ekspektasinya jelas -- ini yang **belum** ada solusinya:
+
+- **Kehilangan progress kalau di-Ctrl+C di tengah mengetik jawaban.**
+  Checkpoint pertanyaan sudah aman (lihat di atas), tapi jawaban yang
+  sedang lo ketik (sebelum baris kosong penutup) belum tersimpan ke disk
+  secara live per baris. Kalau berhenti di tengah mengetik jawaban,
+  jawaban yang sudah diketik hilang, harus mulai jawab dari awal lagi.
+  Saran sementara: siapkan jawaban di text editor dulu, baru paste
+  sekaligus ke terminal.
+- **Revisi satu dokumen tidak otomatis menyinkronkan dokumen
+  turunannya.** Lihat catatan di bagian `prdgen revise` di atas -- ini
+  keputusan desain sadar (supaya tidak boros API call regenerate semua
+  dokumen tiap kali ada revisi kecil), tapi berarti lo perlu ingat sendiri
+  kapan harus regenerate ulang secara manual.
+
+---
+
+## Custom prompt tanpa rebuild
+
+Semua system prompt ada di `internal/prompts/*.txt`, di-embed ke dalam
+binary supaya tidak perlu membawa folder terpisah. Untuk eksperimen ubah
+prompt tanpa compile ulang:
+
+```bash
+cp -r internal/prompts ./my-custom-prompts
+# edit file .txt di ./my-custom-prompts sesuka hati
+export PRDGEN_PROMPT_DIR="./my-custom-prompts"
+prdgen new ./nama-project
+```
+
+---
+
+## Testing
+
+```bash
+go test ./... -v
+```
+
+Semua tahap di-test pakai provider/executor palsu (`llm.MockProvider`,
+`ghissues.MockExecutor`) -- tidak ada panggilan API sungguhan, tidak butuh
+API key atau `gh` asli, jadi cepat dan bisa dijalankan di CI.
+
+---
+
+## Ganti provider LLM
+
+Saat ini pakai DeepSeek, tapi bisa diganti ke provider lain (OpenAI-
+compatible, Claude, dll) tanpa mengubah logic pipeline sama sekali:
+
+1. Implement interface `llm.Provider` (lihat `internal/llm/deepseek.go`
+   sebagai contoh -- cuma perlu 2 method: `Complete()` dan `Name()`).
+2. Ganti baris inisialisasi provider di `cmd/prdgen/main.go`.
+
+Package `internal/pipeline` (tempat semua logic tahap-tahap ada) tidak
+perlu disentuh sama sekali.
