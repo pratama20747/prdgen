@@ -188,13 +188,17 @@ berhenti di tengah.
 ### `prdgen issues` -- generate GitHub issues
 
 ```
-prdgen issues <folder-project> [owner/repo]
+prdgen issues <folder-project> [owner/repo] [--yes|-y]
 ```
 
 Butuh `LLD_PLAN.md` sudah ada (hasil `prdgen lld`), dan butuh **GitHub CLI
 (`gh`) sudah terinstall dan login** (`gh auth login` sekali di awal).
 Argumen `owner/repo` opsional -- kalau tidak diisi, `gh` menebak repo dari
 folder git tempat lo menjalankan command.
+
+Flag `--yes` (atau `-y`) bisa ditaruh di posisi mana saja (misal
+`prdgen issues ./proj --yes owner/repo` atau `prdgen issues ./proj owner/repo --yes`).
+Penjelasan lengkapnya ada di bagian "Mode --yes" di bawah.
 
 **Apa yang dilakukan command ini, langkah demi langkah:**
 
@@ -228,6 +232,29 @@ kalau kebetulan mengandung karakter yang biasanya "berbahaya" di
 terminal seperti `;`, backtick, `$()` -- akan selalu diperlakukan sebagai
 teks biasa, tidak pernah bisa berubah jadi perintah lain yang tidak
 diinginkan.
+
+**Mode `--yes` (skip semua konfirmasi):**
+
+```bash
+prdgen issues ./nama-project --yes
+```
+
+Default command ini selalu menampilkan tiap issue dulu satu per satu buat
+lo review sebelum dibuat (lihat langkah 2 di atas). Kalau lo pengen
+biarkan semua issue dari draft (`ISSUES.json`) langsung dibuat tanpa
+tanya-tanya lagi, tambahkan `--yes` (atau `-y`).
+
+- **Cara kerja:** setiap issue langsung dibuat via `gh issue create`
+  tanpa menampilkan prompt review. Alur `EnsureLabels` + `CreateIssue` +
+  pencatatan ke `ISSUES_CREATED.log` tetap sama persis dengan mode
+  interaktif -- yang di-skip cuma bagian tanya-jawabnya.
+- **Aman dipakai kalau draft sudah lo baca/setujui duluan:** flag ini
+  cuma mempercepat eksekusi `gh issue create` per issue. **Tidak
+  memanggil LLM sama sekali** -- draft di `ISSUES.json` dianggap final,
+  tidak ada yang di-generate ulang.
+- Issue yang sudah pernah dibuat sebelumnya (tercatat di
+  `ISSUES_CREATED.log`) tetap otomatis dilewati seperti biasa, walau
+  dengan `--yes`.
 
 ### `prdgen revise` -- perbaiki dokumen yang sudah jadi
 

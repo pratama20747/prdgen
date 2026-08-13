@@ -23,6 +23,14 @@ func main() {
 }
 
 func run(args []string) error {
+	// Flag global sederhana: --yes/-y bisa muncul di posisi mana saja dalam
+	// args (bukan cuma di akhir), jadi dipisahkan dulu sebelum parsing
+	// argumen posisional (cmd, projectDir, extraArg) supaya urutan
+	// penulisan command tetap fleksibel, misal:
+	//   prdgen issues ./proj owner/repo --yes
+	//   prdgen issues ./proj --yes owner/repo
+	args, autoConfirm := extractYesFlag(args)
+
 	if len(args) < 2 {
 		printUsage()
 		return fmt.Errorf("argumen tidak lengkap")
@@ -64,7 +72,7 @@ func run(args []string) error {
 	case "lld":
 		return runLLDPipeline(ctx, runner, s, reader)
 	case "issues":
-		return runIssuesPipeline(ctx, runner, s, reader, extraArg)
+		return runIssuesPipeline(ctx, runner, s, reader, extraArg, autoConfirm)
 	case "revise":
 		return runRevisePipeline(ctx, runner, s, reader, extraArg)
 	default:
@@ -77,13 +85,21 @@ func printUsage() {
 	fmt.Println(`Pemakaian:
   prdgen new <project-dir>                  discovery -> security audit -> PRD -> validasi PRD
   prdgen lld <project-dir>                  ERD -> API contracts -> coding plan -> validasi LLD
-  prdgen issues <project-dir> [owner/repo]  generate GitHub issues dari LLD_PLAN.md
+  prdgen issues <project-dir> [owner/repo] [--yes|-y]  generate GitHub issues dari LLD_PLAN.md
   prdgen revise <project-dir> [prd|schema|api|plan]  revisi dokumen berdasarkan feedback kamu
 
 Perintah 'issues' butuh binary 'gh' (GitHub CLI) sudah terinstall dan login
 ('gh auth login'). Setiap issue ditampilkan dulu untuk direview sebelum
 benar-benar dibuat -- LLM tidak pernah menjalankan command apapun, cuma
 menghasilkan data (title/body/labels) yang dieksekusi oleh kode Go.
+
+Tambahkan '--yes' (atau '-y') untuk skip review satu-per-satu dan langsung
+buat SEMUA issue dari draft (ISSUES.json) ke GitHub tanpa konfirmasi.
+Aman dipakai kalau draft-nya sudah lo baca/setujui duluan, karena flag ini
+cuma mempercepat eksekusi 'gh issue create' per issue -- tidak memanggil
+LLM sama sekali (draft sudah final, tidak ada yang di-generate ulang).
+Issue yang sudah pernah dibuat sebelumnya (tercatat di ISSUES_CREATED.log)
+tetap otomatis dilewati seperti biasa.
 
 Perintah 'revise' dipakai kalau PRD/schema/API contracts/coding plan yang
 sudah di-generate ada bagian yang salah atau kurang pas -- kasih feedback
@@ -93,6 +109,22 @@ Env vars:
   DEEPSEEK_API_KEY    (wajib) API key DeepSeek
   DEEPSEEK_MODEL      (opsional, default "deepseek-chat")
   PRDGEN_PROMPT_DIR   (opsional) folder berisi *.txt prompt custom, override default`)
+}
+
+// extractYesFlag memisahkan flag --yes/-y dari argumen posisional lain,
+// supaya bisa ditulis di posisi mana saja tanpa mengacaukan parsing
+// cmd/projectDir/extraArg di run().
+func extractYesFlag(args []string) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	found := false
+	for _, a := range args {
+		if a == "--yes" || a == "-y" {
+			found = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, found
 }
 
 func runPRDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, reader *bufio.Reader) error {
@@ -333,7 +365,7 @@ func runLLDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, rea
 // konfirmasi Enter, baru benar-benar dibuat di GitHub lewat gh CLI. LLM
 // tidak pernah menyentuh terminal -- lihat internal/ghissues untuk detail
 // keamanan eksekusinya.
-func runIssuesPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, reader *bufio.Reader, repoOverride string) error {
+func runIssuesPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, reader *bufio.Reader, repoOverride string, autoConfirm bool) error {
 	if !s.IsComplete(store.FileCodingPlan) {
 		return fmt.Errorf("%s tidak ditemukan atau kosong, jalankan 'prdgen lld <project-dir>' dulu", store.FileCodingPlan)
 	}
@@ -408,14 +440,42 @@ func runIssuesPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, 
 		return fmt.Errorf("gagal menyiapkan label di repo: %w", err)
 	}
 
-	fmt.Println("\nSetiap issue ditampilkan dulu sebelum dibuat.")
-	fmt.Println("[Enter]=buat, [s]=skip issue ini, [q]=berhenti sekarang")
+	if autoConfirm {
+		fmt.Println("\nMode --yes aktif: semua issue di draft langsung dibuat tanpa review satu-satu.")
+	} else {
+		fmt.Println("\nSetiap issue ditampilkan dulu sebelum dibuat.")
+		fmt.Println("[Enter]=buat, [s]=skip issue ini, [q]=berhenti sekarang")
+	}
 
 	created := 0
 	for i := range issues {
 		iss := issues[i]
 		if alreadyCreated[iss.Title] {
 			fmt.Printf("\n--- Issue %d/%d: %q sudah pernah dibuat sebelumnya, skip otomatis ---\n", i+1, len(issues), iss.Title)
+			continue
+		}
+
+		if autoConfirm {
+			// Mode --yes: tidak ada review satu-satu, draft di ISSUES.json
+			// dianggap final (sudah dibaca/disetujui user sebelumnya).
+			// Tetap lewat EnsureLabels + CreateIssue yang sama seperti
+			// jalur interaktif -- tidak ada logic baru yang dilewati,
+			// cuma bagian tanya-jawabnya yang di-skip.
+			fmt.Printf("\n--- Issue %d/%d ---\n", i+1, len(issues))
+			fmt.Printf("Title : %s\n", iss.Title)
+			if err := executor.EnsureLabels(ctx, iss.Labels); err != nil {
+				return fmt.Errorf("gagal menyiapkan label untuk issue %q: %w", iss.Title, err)
+			}
+			out, err := executor.CreateIssue(ctx, iss)
+			if err != nil {
+				fmt.Printf("⚠️  Gagal membuat issue: %v\n", err)
+				continue
+			}
+			fmt.Printf("✅ Dibuat: %s\n", out)
+			if logErr := s.Append(store.FileIssuesCreatedLog, iss.Title+"\t"+out); logErr != nil {
+				fmt.Printf("⚠️  Gagal mencatat ke log (issue tetap dibuat di GitHub): %v\n", logErr)
+			}
+			created++
 			continue
 		}
 
