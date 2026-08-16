@@ -171,7 +171,7 @@ func runPRDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, rea
 			fmt.Println("\n[idea] ditemukan 00_idea.md dari sesi sebelumnya, lanjut pakai itu.")
 		} else {
 			fmt.Println("sebelum isi ide disini brainstorming dulu dengan ai di web yang gratis,lalu gambar di excalidraw untuk visualisasi dan setelah konsepnya matang baru ke sini")
-			fmt.Println("Tulis ide aplikasi kamu (akhiri dengan baris kosong):")
+			fmt.Println("Tulis ide aplikasi kamu (akhiri dengan baris berisi EOF lalu Enter, atau Ctrl+D):")
 			rawIdea = readMultiline(reader)
 			if strings.TrimSpace(rawIdea) == "" {
 				return fmt.Errorf("ide tidak boleh kosong")
@@ -211,7 +211,7 @@ func runPRDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, rea
 
 			fmt.Println("\n--- Pertanyaan Discovery ---")
 			fmt.Println(questions)
-			fmt.Println("\nJawab semua pertanyaan di atas (akhiri dengan baris kosong):")
+			fmt.Println("\nJawab semua pertanyaan di atas (akhiri dengan baris berisi EOF lalu Enter, atau Ctrl+D):")
 			answers := readMultiline(reader)
 			discoveryQA = questions + "\n\n=== Jawaban User ===\n" + answers
 			if _, err := s.Save(store.FileDiscoveryQA, discoveryQA); err != nil {
@@ -286,6 +286,31 @@ func determineStartStage(s *store.Store) pipeline.Stage {
 	return pipeline.StageDone
 }
 
+// determineLLDStartStage menentukan stage mulai untuk `prdgen lld`
+// berdasarkan file mana yang sudah ada, sama seperti determineStartStage
+// untuk `prdgen new`. Sebelum ini ada, runLLDPipeline SELALU mulai dari
+// LLDStageErd apapun kondisinya -- kalau proses mati di tengah (misal
+// sudah lolos ERD+API tapi belum plan), jalan ulang bakal generate ulang
+// ERD & API dari nol (buang biaya API call, dan LLM bisa menghasilkan
+// schema/API yang beda dari yang sudah di-approve sebelumnya, padahal
+// stage berikutnya seperti plan/issues sudah dibuat berdasarkan versi
+// lama itu).
+func determineLLDStartStage(s *store.Store) pipeline.LLDStage {
+	if !s.IsComplete(store.FileSchema) {
+		return pipeline.LLDStageErd
+	}
+	if !s.IsComplete(store.FileAPIContracts) {
+		return pipeline.LLDStageApi
+	}
+	if !s.IsComplete(store.FileCodingPlan) {
+		return pipeline.LLDStagePlan
+	}
+	if !s.IsComplete(store.FileLLDValidation) {
+		return pipeline.LLDStageValidate
+	}
+	return pipeline.LLDStageDone
+}
+
 func runLLDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, reader *bufio.Reader) error {
 	if !s.IsComplete(store.FilePRD) {
 		return fmt.Errorf("%s tidak ditemukan atau kosong, jalankan 'prdgen new <project-dir>' dulu", store.FilePRD)
@@ -297,8 +322,38 @@ func runLLDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, rea
 
 	fmt.Println("== prdgen: LLD pipeline ==")
 
-	stage := pipeline.LLDStageErd
+	stage := determineLLDStartStage(s)
+	if stage != pipeline.LLDStageErd {
+		fmt.Printf("Ditemukan checkpoint sebelumnya, resume dari stage: %s\n", stage)
+	}
+
 	var schema, apiContracts, codingPlan string
+	if s.IsComplete(store.FileSchema) {
+		v, err := s.Load(store.FileSchema)
+		if err != nil {
+			return err
+		}
+		schema = v
+	}
+	if s.IsComplete(store.FileAPIContracts) {
+		v, err := s.Load(store.FileAPIContracts)
+		if err != nil {
+			return err
+		}
+		apiContracts = v
+	}
+	if s.IsComplete(store.FileCodingPlan) {
+		v, err := s.Load(store.FileCodingPlan)
+		if err != nil {
+			return err
+		}
+		codingPlan = v
+	}
+
+	if stage == pipeline.LLDStageDone {
+		fmt.Println("🎉 Semua tahap LLD sudah selesai sebelumnya. Hapus file terkait di project dir kalau mau generate ulang salah satu stage, atau pakai 'prdgen revise'.")
+		return nil
+	}
 
 	for stage != pipeline.LLDStageDone {
 		switch stage {
@@ -698,7 +753,7 @@ func runRevisePipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, 
 	docContext := strings.Join(contextParts, "\n\n")
 
 	fmt.Printf("== prdgen: revisi %s ==\n", t.file)
-	fmt.Println("Tulis feedback kamu (akhiri dengan baris kosong):")
+	fmt.Println("Tulis feedback kamu (akhiri dengan baris berisi EOF lalu Enter, atau Ctrl+D):")
 	feedback := readMultiline(reader)
 	if strings.TrimSpace(feedback) == "" {
 		return fmt.Errorf("feedback tidak boleh kosong")
@@ -723,21 +778,77 @@ func runRevisePipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, 
 		return err
 	}
 	fmt.Printf("✅ Tersimpan di %s\n", path)
-	fmt.Println("⚠️  Ingat: dokumen lain yang bergantung pada file ini (misal PRD -> LLD,")
-	fmt.Println("   atau LLD -> issues) mungkin jadi tidak sinkron. Jalankan ulang tahap")
-	fmt.Println("   validasi atau command berikutnya kalau perlu.")
+	printDownstreamStalenessWarning(s, target)
 	return nil
 }
 
+// printDownstreamStalenessWarning ingetin user kalau dokumen yang baru
+// direvisi punya dokumen turunan yang sudah digenerate duluan dari versi
+// LAMA -- dokumen turunan itu sekarang berpotensi tidak sinkron (state
+// bug kalau didiamkan begitu saja tanpa pemberitahuan, karena
+// determineLLDStartStage/runIssuesPipeline cuma cek "file-nya ada atau
+// tidak", bukan "apakah masih konsisten dengan dokumen upstream yang baru
+// direvisi"). Ini bukan auto-invalidate (sengaja, biar tidak ujug-ujug
+// hilang tanpa persetujuan user) -- cuma warning supaya user sadar dan
+// bisa putuskan sendiri mau revisi ulang dokumen turunannya atau tidak.
+func printDownstreamStalenessWarning(s *store.Store, target string) {
+	var downstream []string
+	switch target {
+	case "prd":
+		downstream = []string{store.FileSchema, store.FileAPIContracts, store.FileCodingPlan, store.FileIssuesJSON}
+	case "schema":
+		downstream = []string{store.FileAPIContracts, store.FileCodingPlan, store.FileIssuesJSON}
+	case "api":
+		downstream = []string{store.FileCodingPlan, store.FileIssuesJSON}
+	case "plan":
+		downstream = []string{store.FileIssuesJSON}
+	}
+
+	var stale []string
+	for _, f := range downstream {
+		if s.IsComplete(f) {
+			stale = append(stale, f)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	fmt.Printf("\n⚠️  Perhatian: %s sudah digenerate dari versi %s yang LAMA (sebelum revisi ini),\n", strings.Join(stale, ", "), target)
+	fmt.Println("   jadi sekarang berpotensi tidak sinkron. Kalau perubahan tadi cukup besar,")
+	fmt.Println("   pertimbangkan jalankan 'prdgen revise' lagi untuk dokumen turunan itu juga,")
+	fmt.Println("   atau hapus filenya lalu generate ulang lewat 'prdgen lld' / 'prdgen issues'.")
+}
+
+// readMultiline membaca input multi-baris dari terminal sampai user
+// mengetik baris berisi "EOF" saja (case-insensitive) atau menekan
+// Ctrl+D (EOF stream beneran).
+//
+// PENTING: dulu terminatornya baris kosong. Itu bug -- teks yang di-paste
+// (misal jawaban buat beberapa pertanyaan sekaligus) hampir selalu punya
+// baris kosong di tengah sebagai pemisah paragraf/pemisah antar-jawaban.
+// Begitu ketemu baris kosong pertama, loop berhenti dan SISA baris yang
+// belum sempat dibaca dari stdin tetap nyangkut di buffer -- lalu ke-baca
+// diam-diam oleh prompt berikutnya (misal jadi auto-jawaban confirm()
+// "Lanjut ke stage X?"), bikin state pipeline kelihatan "ngaco" padahal
+// akar masalahnya cuma di sini. Sentinel "EOF" jauh lebih aman karena
+// baris kosong di tengah paste tetap dianggap bagian dari isi, bukan
+// penanda selesai.
 func readMultiline(reader *bufio.Reader) string {
 	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
+		hasContent := len(line) > 0
 		trimmed := strings.TrimRight(line, "\r\n")
-		if trimmed == "" || err != nil {
+		if strings.EqualFold(strings.TrimSpace(trimmed), "EOF") {
 			break
 		}
-		lines = append(lines, trimmed)
+		if hasContent {
+			lines = append(lines, trimmed)
+		}
+		if err != nil {
+			// Ctrl+D / EOF stream asli, bukan cuma baris kosong biasa.
+			break
+		}
 	}
 	return strings.Join(lines, "\n")
 }
