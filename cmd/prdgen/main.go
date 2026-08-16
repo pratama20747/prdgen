@@ -160,14 +160,25 @@ func runPRDPipeline(ctx context.Context, r *pipeline.Runner, s *store.Store, rea
 	}
 
 	if stage == pipeline.StageDiscovery {
-		fmt.Println("sebelum isi ide disini brainstorming dulu dengan ai di web yang gratis,lalu gambar di excalidraw untuk visualisasi dan setelah konsepnya matang baru ke sini")
-		fmt.Println("Tulis ide aplikasi kamu (akhiri dengan baris kosong):")
-		rawIdea = readMultiline(reader)
-		if strings.TrimSpace(rawIdea) == "" {
-			return fmt.Errorf("ide tidak boleh kosong")
-		}
-		if _, err := s.Save(store.FileIdea, rawIdea); err != nil {
-			return err
+		if s.IsComplete(store.FileIdea) {
+			// 00_idea.md sudah ada dari sesi sebelumnya (rawIdea sudah
+			// di-load di atas). Jangan tanya lagi -- ini bug lama: sebelum
+			// fix ini, kondisinya cuma cek stage == StageDiscovery tanpa
+			// cek apakah ide-nya sendiri sudah tersimpan, jadi user selalu
+			// diminta nulis ide ulang tiap kali resume ke stage discovery
+			// (misal karena baru selesai jawab 01a_discovery_questions.md
+			// secara manual tapi belum sempat generate 01_discovery_qa.md).
+			fmt.Println("\n[idea] ditemukan 00_idea.md dari sesi sebelumnya, lanjut pakai itu.")
+		} else {
+			fmt.Println("sebelum isi ide disini brainstorming dulu dengan ai di web yang gratis,lalu gambar di excalidraw untuk visualisasi dan setelah konsepnya matang baru ke sini")
+			fmt.Println("Tulis ide aplikasi kamu (akhiri dengan baris kosong):")
+			rawIdea = readMultiline(reader)
+			if strings.TrimSpace(rawIdea) == "" {
+				return fmt.Errorf("ide tidak boleh kosong")
+			}
+			if _, err := s.Save(store.FileIdea, rawIdea); err != nil {
+				return err
+			}
 		}
 	}
 
